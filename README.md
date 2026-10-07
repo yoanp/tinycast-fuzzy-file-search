@@ -50,7 +50,8 @@ Other changes:
 
 ## How it works
 
-- Every time you open the command it reindexes the selected search roots with `fd`. The index is written straight to a file in the extension support directory and never loaded into memory.
+- Every time you open the command it reindexes the selected search roots with `fd` in the background. The index is written straight to a file in the extension support directory and never loaded into memory.
+- While reindexing, queries run against the index from the previous launch, so results appear immediately; they refresh once the new index is ready.
 - Each query runs `fzf --filter` over that file and returns the top 200 matches.
 
 ## Configure the search
@@ -72,7 +73,7 @@ Other changes:
 
 ## Known limitations
 
-- Indexing is not incremental: the selected roots are re-scanned each time the command opens (home with ~870k entries takes about 6 seconds). Cached results are shown meanwhile.
+- Indexing is not incremental: the selected roots are re-scanned each time the command opens (home with ~870k entries takes about 6 seconds). Until it finishes, files created since the previous launch are missing from results. The very first search on a root waits for its first index.
 - If TinyCast is closed while indexing, `fd` finishes in the background; leftover `.temp` files are cleaned up on the next launch.
 - Paths containing a newline are not supported (fzf output is newline-separated).
 

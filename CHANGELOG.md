@@ -6,6 +6,7 @@
 - Run fd/fzf through `/bin/sh` redirections and cap results with `head`, since TinyCast ignores `spawn` stdio/signal options and buffers output until exit
 - Write fd ignore rules to the extension support directory instead of `~/.config/fd/ignore`
 - Rank with `fzf --scheme=path`; `Ignore Spaces in Search` defaults to off
+- Search the previous index immediately while reindexing in the background
 
 ## [Show in Finder Shortcut] - 2026-07-06
 

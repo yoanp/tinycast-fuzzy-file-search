@@ -171,7 +171,7 @@ export default function Command() {
         toast.hide();
       }
 
-      return { filepath: fdOutput, randomUUID: randomUUID(), indexType };
+      return { filepath: fdOutput, randomUUID: randomUUID(), indexType, searchRoot };
     },
     [searchRoot, fdPath, parsedSearch.indexType],
     {
@@ -193,6 +193,11 @@ export default function Command() {
         return [];
       }
 
+      // The cached index from a previous launch may have been removed meanwhile.
+      if (!fs.existsSync(fdOutput)) {
+        return [];
+      }
+
       // Results are capped inside the shell pipeline: memory limits would otherwise
       // terminate the extension on short queries. Issue #21580
       const filteredResults = await filterIndex(
@@ -205,13 +210,15 @@ export default function Command() {
       console.log(`fzf returned ${filteredResults.length} results`);
       return filteredResults;
     },
-    // randomUUID is used to trigger fzf on updated index list from fd
+    // randomUUID is used to trigger fzf on updated index list from fd.
+    // fzf does not wait for reindexing: it searches the cached index from the previous
+    // launch right away and reruns once the fresh index replaces it.
     [debouncedQuery, fzfPath, fdOutput?.filepath, fdOutput?.randomUUID],
     {
       execute:
         fzfPath !== undefined &&
         fdOutput !== undefined &&
-        !isFdOutputLoading &&
+        fdOutput.searchRoot === searchRoot &&
         fdOutput.indexType === parsedSearch.indexType &&
         debouncedQuery.length > 0,
       abortable: abortableFzf,
@@ -221,7 +228,8 @@ export default function Command() {
     },
   );
 
-  const isIndexReady = fdOutput !== undefined && fdOutput.indexType === parsedSearch.indexType;
+  const isIndexReady =
+    fdOutput !== undefined && fdOutput.searchRoot === searchRoot && fdOutput.indexType === parsedSearch.indexType;
   const isResultsCurrent = resultsIndexType === parsedSearch.indexType;
   const displayPaths = debouncedQuery && isIndexReady && isResultsCurrent ? filteredPaths : undefined;
   const homeDir = os.homedir();
