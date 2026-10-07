@@ -18,16 +18,28 @@ brew install fd fzf
 
 The extension looks for `fd` and `fzf` in `/opt/homebrew/bin`, `/usr/local/bin`, then `PATH`. It no longer downloads them.
 
-## Build and install in TinyCast
+## Install in TinyCast
+
+1. Install `fd` and `fzf` (see above). Node.js and a package manager (npm, pnpm, Yarn or Bun) must also be installed; TinyCast uses them to build the extension.
+2. If the Store version of "Fuzzy File Search" is installed, remove it first; it crashes with `a.utimes is not a function`.
+3. Open **Settings → Extensions → Install New → Install from GitHub** and enter:
+
+   ```text
+   yoanp/tinycast-fuzzy-file-search
+   ```
+
+   TinyCast downloads the repository, runs `install --ignore-scripts` and `ray build -e dist`, and installs the result.
+
+To update, push to `main` and run **Install from GitHub** again. GitHub installs are not updated automatically.
+
+### Local development build
 
 ```bash
 npm install
 npm run build
 ```
 
-`npm run build` runs `ray build -e dist -o dist`. In TinyCast, open **Settings → Extensions → Install → Add from folder** and pick the `dist/` folder (it contains `package.json`, `search-for-files.js` and `assets/`).
-
-Remove the Store version of "Fuzzy File Search" from TinyCast first if it is installed; it crashes with `a.utimes is not a function`.
+`npm run build` runs `ray build -e dist -o dist`. In TinyCast, use **Install New → Add from folder** and pick `dist/` (it contains `package.json`, `search-for-files.js` and `assets/`).
 
 ## What changed from upstream
 
