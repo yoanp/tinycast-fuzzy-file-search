@@ -1,5 +1,12 @@
 # Fuzzy File Search Changelog
 
+## [TinyCast Compatibility] - 2026-10-07
+
+- Use Homebrew `fd`/`fzf` instead of downloading them; drop `proper-lockfile`, `axios`, `tar`, `extract-zip`, `sha256-file`
+- Run fd/fzf through `/bin/sh` redirections and cap results with `head`, since TinyCast ignores `spawn` stdio/signal options and buffers output until exit
+- Write fd ignore rules to the extension support directory instead of `~/.config/fd/ignore`
+- Rank with `fzf --scheme=path`; `Ignore Spaces in Search` defaults to off
+
 ## [Show in Finder Shortcut] - 2026-07-06
 
 - Add Cmd+Enter shortcut to reveal the selected file in Finder by placing Show in Finder as the secondary action

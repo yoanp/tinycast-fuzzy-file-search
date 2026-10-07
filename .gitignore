@@ -13,3 +13,6 @@ compiled_raycast_rust
 # misc
 .DS_Store
 .direnv/
+
+# build output (install this folder in TinyCast)
+/dist

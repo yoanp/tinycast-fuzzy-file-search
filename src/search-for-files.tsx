@@ -1,19 +1,15 @@
-import { ActionPanel, List, Action, getPreferenceValues, environment, showToast, Toast } from "@raycast/api";
+import { ActionPanel, List, Action, getPreferenceValues, environment, showToast, Toast, Icon } from "@raycast/api";
 import { useCachedPromise, useCachedState, usePromise } from "@raycast/utils";
-import { spawn } from "child_process";
 import path, { basename } from "path";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ensureFdCLI } from "./lib/fd-downloader";
 import { FdIndexType, parseSearchQuery } from "./lib/parse-search-query";
 import os from "os";
 import fs from "fs";
 import afs from "fs/promises";
-import { ensureFzfCLI } from "./lib/fzf-downloader";
-import readline from "readline";
-import Stream from "stream";
 import assert from "assert";
 import sanitizeFilename from "sanitize-filename";
 import { randomInt, randomUUID } from "crypto";
+import { buildFdIndex, filterIndex, findExecutable, MISSING_CLI_MESSAGE, MissingCliError } from "./lib/cli";
 
 type Prefs = {
   includeDirectories: boolean;
@@ -25,6 +21,22 @@ type Prefs = {
 
 const MAX_FZF_RESULTS = 200;
 const FZF_DEBOUNCE_MS = 200;
+
+// Kept in the extension's support directory and passed with --ignore-file, so the user's
+// global ~/.config/fd/ignore is left alone. Anchored patterns are resolved against "/"
+// (fd runs with cwd "/"), so absolute paths work as written.
+function fdIgnorePatterns(home: string): string[] {
+  return [
+    "/nix/",
+    "/System/",
+    "/Library/",
+    "/private/",
+    "/usr/",
+    path.join(home, "Library/*"),
+    `!${path.join(home, "Library/CloudStorage/")}`,
+    "*.photoslibrary/",
+  ];
+}
 
 export default function Command() {
   const abortableFd = useRef<AbortController>(new AbortController());
@@ -47,29 +59,33 @@ export default function Command() {
     setResultsIndexType(null);
   }, [parsedSearch.indexType]);
 
-  // Get FD CLI path
-  const { data: fdPath, isLoading: isFdLoading } = useCachedPromise(async () => {
-    try {
-      return await ensureFdCLI();
-    } catch (error) {
-      throw new Error(`Couldn't load the fd CLI: ${error}`);
-    }
-  });
-
-  // Get FZF CLI path
-  const { data: fzfPath, isLoading: isFzfCliLoading } = useCachedPromise(async () => {
-    try {
-      return await ensureFzfCLI();
-    } catch (error) {
-      throw new Error(`Couldn't load the fzf CLI: ${error}`);
-    }
-  });
+  // Locate the Homebrew-installed fd and fzf. Not cached, so installing them later is
+  // picked up the next time the command opens.
+  const { data: cli, error: cliError } = usePromise(
+    async () => ({ fd: findExecutable("fd"), fzf: findExecutable("fzf") }),
+    [],
+    {
+      onError: (error) => {
+        if (error instanceof MissingCliError) {
+          showToast({
+            style: Toast.Style.Failure,
+            title: "fd and fzf are required",
+            message: "Install them with: brew install fd fzf",
+          });
+        } else {
+          showToast({ style: Toast.Style.Failure, title: "Couldn't locate fd/fzf", message: String(error) });
+        }
+      },
+    },
+  );
+  const fdPath = cli?.fd;
+  const fzfPath = cli?.fzf;
 
   // cleanup old .temp files (older than 10min)
   // In this extension when user exits during indexing, it will leave
   // temp files behind.
-  // The cleanup needs to be done on mount as raycast kills the
-  // extensions without calling unmount functions nor sending signals when user exits extension.
+  // The cleanup needs to be done on mount as the launcher may kill the
+  // extension without calling unmount functions nor sending signals when user exits extension.
   // Issue #2022
   useEffect(() => {
     let canceled = false;
@@ -85,15 +101,15 @@ export default function Command() {
         const filepath = path.join(environment.supportPath, filename);
         const stats = await afs.stat(filepath);
 
-        const birthtimeDiff = now - stats.birthtimeMs;
-        if (birthtimeDiff > CutoffMs) {
-          console.log(`birthtimeMsDiff: ${birthtimeDiff.toFixed(0)}, removing ${filepath}`);
+        const ageMs = now - (stats.mtimeMs || stats.birthtimeMs);
+        if (ageMs > CutoffMs) {
+          console.log(`temp file age: ${ageMs.toFixed(0)}ms, removing ${filepath}`);
           await afs.rm(filepath, {
             force: true,
           });
         }
       }
-    })();
+    })().catch((error) => console.error(`temp file cleanup failed: ${error}`));
 
     return () => {
       canceled = true;
@@ -107,25 +123,11 @@ export default function Command() {
       assert(fdPath !== undefined);
       assert(indexType !== undefined);
 
-      const ignoreFile = path.join(os.homedir(), ".config", "fd", "ignore");
-      if (!fs.existsSync(ignoreFile)) {
-        console.log(`creating default .fdignore file in: ${ignoreFile}`);
-        // Create directories
-        afs.mkdir(path.dirname(ignoreFile), { recursive: true });
-        const ignorePaths = [
-          "/nix/",
-          "/System/",
-          "/Library/",
-          "/private/",
-          "/usr/",
-          path.join(os.homedir(), "Library/*"),
-          path.join(os.homedir(), "!/Library/CloudStorage/"),
-          path.join(os.homedir(), "**", "*.photoslibrary/"),
-        ];
-        await afs.writeFile(ignoreFile, ignorePaths.join("\n"));
-      }
+      await afs.mkdir(environment.supportPath, { recursive: true });
+      const ignoreFile = path.join(environment.supportPath, "fd-ignore");
+      await afs.writeFile(ignoreFile, fdIgnorePatterns(os.homedir()).join("\n") + "\n");
 
-      let optionalArgs: string[] = [];
+      let optionalArgs: string[] = ["--ignore-file", ignoreFile];
       if (indexType === "directory") {
         optionalArgs = [...optionalArgs, "--type", "d"];
       } else if (indexType === "file") {
@@ -140,7 +142,7 @@ export default function Command() {
         optionalArgs = [...optionalArgs, "--follow"];
       }
 
-      const searchDirs = searchRoot.split(" ");
+      const searchDirs = searchRoot.split(" ").filter(Boolean);
 
       // Final file fzf is reading from
       const fdOutput = path.join(environment.supportPath, `fd-out-${sanitizeFilename(searchRoot)}-${indexType}.txt`);
@@ -157,44 +159,18 @@ export default function Command() {
         toast.message = "creating index of files using fd";
       }
 
-      const outFD = fs.openSync(fdOutputTemp, "wx");
       try {
-        const fd = spawn(fdPath, [...optionalArgs, "--print0", ".", ...searchDirs], {
-          stdio: ["ignore", outFD, "pipe"],
-          signal: abortableFd.current?.signal,
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          let stderr = "";
-          fd.stderr?.on("data", (chunk) => {
-            stderr += chunk;
-          });
-
-          fd.on("error", () => {
-            console.log("aborting fd");
-            fs.rmSync(fdOutputTemp, { force: true });
-            reject("'fd' aborted");
-          });
-
-          fd.on("close", (code) => {
-            if (code === 0) {
-              resolve();
-            } else {
-              console.log("closing fd with code", code);
-              fs.rmSync(fdOutputTemp, { force: true });
-              reject(`Exit code of 'fd' = ${code}:\n${stderr}`);
-            }
-          });
-        });
+        await buildFdIndex(
+          fdPath,
+          [...optionalArgs, "--print0", ".", ...searchDirs],
+          fdOutput,
+          fdOutputTemp,
+          abortableFd.current?.signal,
+        );
       } finally {
-        fs.closeSync(outFD);
+        toast.hide();
       }
 
-      toast.hide();
-
-      console.log(`renaming ${basename(fdOutputTemp)} -> ${basename(fdOutput)}`);
-      await afs.rename(fdOutputTemp, fdOutput);
-      console.log(`finished renaming ${basename(fdOutputTemp)} -> ${basename(fdOutput)}`);
       return { filepath: fdOutput, randomUUID: randomUUID(), indexType };
     },
     [searchRoot, fdPath, parsedSearch.indexType],
@@ -205,73 +181,27 @@ export default function Command() {
     },
   );
 
-  // Get filteredPaths from fzf output
+  // Get filteredPaths from fzf output.
+  // usePromise drops results from superseded calls, and aborting kills the previous fzf.
   const { data: filteredPaths, isLoading: isFilteredPathsLoading } = usePromise(
     async (query: string, fzfPath?: string, fdOutput?: string, _?: string) => {
       assert(fzfPath !== undefined);
       assert(fdOutput !== undefined);
       assert(_ !== undefined); // required by linter
 
-      const filteredResults: string[] = [];
       if (!query) {
-        return filteredResults;
+        return [];
       }
 
-      const fdOutputFD = fs.openSync(fdOutput, "r");
-      try {
-        const fzf = spawn(fzfPath, ["--read0", "--filter", query], {
-          stdio: [fdOutputFD, "pipe", "pipe"],
-          signal: abortableFzf.current?.signal,
-        });
-        await new Promise<void>((resolve, reject) => {
-          let hitResultLimit = false;
-          let aborted = false;
-          const rl = readline.createInterface({ input: fzf.stdout as Stream.Readable });
-          rl.on("line", (line) => {
-            if (aborted) {
-              return;
-            }
-            // Limit results, as otherwise they will exceed memory limits,
-            // raycast will terminate the extension. Issue #21580
-            if (filteredResults.length >= MAX_FZF_RESULTS) {
-              // It sends the kill signal when reaching the cap,
-              // so results may be slightly larger than MAX_FZF_RESULTS
-              hitResultLimit = true;
-              fzf.kill();
-            } else {
-              filteredResults.push(line);
-            }
-          });
-
-          let stderr = "";
-          fzf.stderr?.on("data", (chunk) => {
-            stderr += chunk;
-          });
-
-          fzf.on("error", () => {
-            aborted = true;
-            console.log("aborting fzf");
-          });
-
-          fzf.on("close", (code) => {
-            rl.close();
-            if (aborted) {
-              const error = new Error("Aborted");
-              error.name = "AbortError";
-              reject(error);
-              return;
-            }
-            // Fzf returns error code 1 if output is empty
-            if (code === 0 || code === null || hitResultLimit || (code === 1 && stderr.length === 0)) {
-              resolve();
-            } else {
-              reject(`Exit code of 'fzf' = ${code}:\n${stderr}`);
-            }
-          });
-        });
-      } finally {
-        fs.closeSync(fdOutputFD);
-      }
+      // Results are capped inside the shell pipeline: memory limits would otherwise
+      // terminate the extension on short queries. Issue #21580
+      const filteredResults = await filterIndex(
+        fzfPath,
+        query,
+        fdOutput,
+        MAX_FZF_RESULTS,
+        abortableFzf.current?.signal,
+      );
       console.log(`fzf returned ${filteredResults.length} results`);
       return filteredResults;
     },
@@ -294,34 +224,42 @@ export default function Command() {
   const isIndexReady = fdOutput !== undefined && fdOutput.indexType === parsedSearch.indexType;
   const isResultsCurrent = resultsIndexType === parsedSearch.indexType;
   const displayPaths = debouncedQuery && isIndexReady && isResultsCurrent ? filteredPaths : undefined;
+  const homeDir = os.homedir();
 
   return (
     <List
       navigationTitle="Search Files"
       isLoading={
-        isFdLoading ||
-        isFzfCliLoading ||
+        (cli === undefined && cliError === undefined) ||
         isFdOutputLoading ||
         isFilteredPathsLoading ||
-        (debouncedQuery.length > 0 && (!isIndexReady || !isResultsCurrent))
+        (cli !== undefined && debouncedQuery.length > 0 && (!isIndexReady || !isResultsCurrent))
       }
       searchBarPlaceholder={"Search files — use -d or -f for directories/files only"}
       onSearchTextChange={setSearchText}
       filtering={false} // disable builtin filtering as we use a custom one
       searchBarAccessory={
         <List.Dropdown tooltip="Search" value={searchRoot} onChange={setSearchRoot}>
-          <List.Dropdown.Item title="Home (~)" value={os.homedir()} />
+          <List.Dropdown.Item title="Home (~)" value={homeDir} />
           <List.Dropdown.Item title="Everything (/)" value={"/"} />
           <List.Dropdown.Item title={`Custom Directories`} value={prefs.customSearchDirs} />
         </List.Dropdown>
       }
     >
+      {cliError ? (
+        <List.EmptyView
+          icon={Icon.ExclamationMark}
+          title="fd and fzf are required"
+          description={cliError instanceof MissingCliError ? MISSING_CLI_MESSAGE : String(cliError)}
+        />
+      ) : null}
       {displayPaths?.map((filepath) => {
         const filename = basename(filepath);
+        const isUnderHome = filepath === homeDir || filepath.startsWith(homeDir + path.sep);
         return (
           <List.Item
             key={filepath}
-            title={filepath.startsWith(os.homedir()) ? filepath.replace(os.homedir(), "~") : filepath}
+            title={isUnderHome ? "~" + filepath.slice(homeDir.length) : filepath}
             subtitle={filename}
             quickLook={{ path: filepath, name: filename }}
             actions={
